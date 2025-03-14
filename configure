@@ -1,0 +1,128 @@
+import os
+import pwd
+import subprocess
+
+def install_supervisord():
+    try:
+        subprocess.run(["supervisord", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print("Supervisord is already installed.")
+    except FileNotFoundError:
+        print("Supervisord not found. Installing...")
+        subprocess.run(["sudo", "apt", "install", "-y", "supervisor"], check=True)
+        print("Supervisord installed successfully.")
+        # Exit sudo status
+        subprocess.run(["sudo", "-k"], check=True)
+        print("Exited sudo status.")
+
+def ensure_supervisord_conf():
+    conf_path = "/etc/supervisor/supervisord.conf"
+    if not os.path.exists(conf_path):
+        print("Creating a default supervisord.conf file...")
+        default_conf = """
+[supervisord]
+logfile=/var/log/supervisord.log
+logfile_maxbytes=50MB
+logfile_backups=10
+loglevel=info
+pidfile=/var/run/supervisord.pid
+nodaemon=false
+minfds=1024
+minprocs=200
+
+[supervisorctl]
+serverurl=unix:///var/run/supervisor.sock
+"""
+        subprocess.run(["sudo", "bash", "-c", f"echo '{default_conf}' > {conf_path}"], check=True)
+        print("Default supervisord.conf created.")
+
+def confirm_or_get_path(default_path, prompt, path_type, must_exist=True):
+    while True:
+        choice = input(f"Is this the correct path for {path_type}? {default_path} (y/n): ").strip().lower()
+        if choice == "y":
+            return default_path
+        elif choice == "n":
+            while True:
+                new_path = input(prompt).strip()
+                if not must_exist or os.path.exists(new_path):
+                    return new_path
+                print(f"Error: The specified {path_type} does not exist. Please enter a valid path.")
+        else:
+            print("Invalid choice. Please enter 'y' or 'n'.")
+
+def get_valid_user(prompt):
+    while True:
+        user = input(prompt).strip()
+        try:
+            pwd.getpwnam(user)
+            return user
+        except KeyError:
+            print("Invalid user. Please enter a valid system user.")
+
+def create_supervisord_config():
+    current_dir = os.getcwd()
+    
+    python_base_path = confirm_or_get_path(current_dir, "Enter the base path to the Python environment: ", "the Python environment")
+    env_name = input("Enter the environment name (e.g., 'env'): ").strip()
+    python_env = os.path.join(python_base_path, env_name, "bin", "python")
+    while not os.path.isfile(python_env):
+        print(f"Error: The specified Python environment does not exist: {python_env}")
+        python_base_path = confirm_or_get_path(current_dir, "Enter the base path to the Python environment: ", "the Python environment")
+        env_name = input("Enter the environment name (e.g., 'env'): ").strip()
+        python_env = os.path.join(python_base_path, env_name, "bin", "python")
+    print(f"Using Python environment: {python_env}")
+    
+    script_base_path = confirm_or_get_path(current_dir, "Enter the base path where the script is located: ", "the script location")
+    script_name = input("Enter the script name (including .py extension): ").strip()
+    script_path = os.path.join(script_base_path, script_name)
+    while not os.path.isfile(script_path):
+        print(f"Error: The specified script does not exist: {script_path}")
+        script_base_path = confirm_or_get_path(current_dir, "Enter the base path where the script is located: ", "the script location")
+        script_name = input("Enter the script name (including .py extension): ").strip()
+        script_path = os.path.join(script_base_path, script_name)
+    print(f"Using script path: {script_path}")
+    
+    working_dir = script_base_path
+    user = get_valid_user("Enter the user to run the process: ")
+    program_name = input("Enter the program name for supervisord: ").strip()
+    
+    log_file = os.path.join(working_dir, f"{script_name}.log")
+    
+    config_content = f"""
+[program:{program_name}]
+command={python_env} {script_path}
+directory={working_dir}
+user={user}
+autorestart=true
+stderr_logfile={log_file}
+stdout_logfile={log_file}
+    """.strip()
+    
+    config_path = os.path.join(working_dir, "supervisord.conf")
+    with open(config_path, "w") as config_file:
+        config_file.write(config_content)
+    
+    print(f"Supervisord config created: {config_path}")
+    
+    # Option to copy config to required directory
+    target_path = "/etc/supervisor/conf.d/"
+    copy_choice = input(f"Would you like to copy the config to {target_path}? (y/n): ").strip().lower()
+    if copy_choice == "y":
+        try:
+            target_conf_path = os.path.join(target_path, f"{program_name}.conf")
+            if os.path.exists(target_conf_path):
+                replace_choice = input(f"A config file with the name {program_name}.conf already exists. Do you want to replace it? (y/n): ").strip().lower()
+                if replace_choice != "y":
+                    print("Copy operation canceled.")
+                    return
+            subprocess.run(["sudo", "cp", config_path, target_conf_path], check=True)
+            print(f"Config copied to {target_path}{program_name}.conf")
+            subprocess.run(["sudo", "supervisorctl", "update"], check=True)
+            subprocess.run(["sudo", "systemctl", "restart", "supervisor"], check=True)
+            print("Supervisor restarted successfully.")
+        except subprocess.CalledProcessError:
+            print("Error copying the config. Please check permissions.")
+
+if __name__ == "__main__":
+    install_supervisord()
+    ensure_supervisord_conf()
+    create_supervisord_config()
